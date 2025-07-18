@@ -372,6 +372,7 @@ class MultiBaseModel(BaseModel):
             (dict): multi-heads output.
         """
         outputs, y, dt, embeddings = {}, [], [], []  # add `outputs` to collect multi-heads outputs
+        multi_head_types = getattr(self, "multi_head_types", (Detect, Segment, Pose))  # multi-heads types
         embed = frozenset(embed) if embed is not None else {-1} # 用户可以传入一个列表，指定哪些层的输出需要做embedding(特征池化)，如[5, 10, 15]，转成frozenset方便后续判断
         max_idx = max(embed) # embed列表中的最大层索引，用于判断最后是否到达最后一个embedding层
         for m in self.model:
@@ -381,11 +382,11 @@ class MultiBaseModel(BaseModel):
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
             # collect multi-heads outputs
-            if isinstance(m, (Detect, Segment, Pose)):
+            if isinstance(m, multi_head_types):
                 outputs[type(m).__name__] = x # {"Detect":output1, "Segment":output2, "Pose":output3}
             y.append(x if m.i in self.save else None)  # 如果当前层索引在 self.save 列表中，则保存该层输出到 y，供后续层使用
             if visualize:
-                feature_visualization(x, m.type, m.i, save_dir=visualize) # 如果 visualize=True，对当前层的特征图做可视化保存
+                feature_visualization(x, getattr(m, 'type', type(m).__name__), m.i, save_dir=visualize) # 如果 visualize=True，对当前层的特征图做可视化保存
             if m.i in embed: # 如果当前层索引在 embed 列表中，说明用户希望提取该层的 embedding
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # 对当前层输出做自适应池化，变成 (batch, channel)
                 if m.i == max_idx: # 如果当前层是 embed 列表中的最大索引，说明 embedding 收集完毕
@@ -394,8 +395,78 @@ class MultiBaseModel(BaseModel):
         return outputs
 
 
+    def _profile_one_layer(self, m, x, dt):
+        """
+        Profile the computation time and FLOPs of a single layer of the model on a given input.
+
+        Args:
+            m (torch.nn.Module): The layer to be profiled.
+            x (torch.Tensor): The input data to the layer.
+            dt (list): A list to store the computation time of the layer.
+        """
+        try:
+            import thop
+        except ImportError:
+            thop = None  # conda support without 'ultralytics-thop' installed
+
+        c = m in self.model[-3:] and isinstance(x, list)  # TODO 这里可以根据head优化成更通用的形式
+        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1e9 * 2 if thop else 0  # GFLOPs
+        t = time_sync()
+        for _ in range(10):
+            m(x.copy() if c else x)
+        dt.append((time_sync() - t) * 100)
+        if m == self.model[0]:
+            LOGGER.info(f"{'time (ms)':>10s} {'GFLOPs':>10s} {'params':>10s}  module")
+        LOGGER.info(f"{dt[-1]:10.2f} {flops:10.2f} {m.np:10.0f}  {m.type}")
+        if c:
+            LOGGER.info(f"{sum(dt):10.2f} {'-':>10s} {'-':>10s}  Total")    
+
+
+    def _apply(self, fn):
+        """
+        Apply a function to all tensors in the model that are not parameters or registered buffers.
+
+        Args:
+            fn (function): The function to apply to the model.
+
+        Returns:
+            (BaseModel): An updated BaseModel object.
+        """
+        self = super()._apply(fn)
+        multi_head_types = getattr(self, "multi_head_types", (Detect, Segment, Pose)) 
+        for m in self.model[-3:]: # TODO 这里可以根据head优化成更通用的形式
+            if isinstance(m, multi_head_types):
+                m.stride = fn(m.stride)
+                m.anchors = fn(m.anchors)
+                m.strides = fn(m.strides)
+        return self
+
 class MultiModel(MultiBaseModel):
-    pass # TODO
+    
+    def __init__(self, cfg='yolo11n-multi.yaml', ch=3, nc=None, verbose=True):
+        """
+        Initialize the MultiModel with the given configuration and parameters.
+
+        Args:
+            cfg (str | dict): Model configuration file path or dictionary.
+            ch (int): Number of input channels.
+            nc (int, optional): Number of classes.
+            verbose (bool): Whether to display model information.
+        """
+        super().__init__()
+        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+        
+        # Define model
+        ch = self.yaml['ch'] = self.yaml.get('channels', ch)  # save channels
+        if nc and nc != self.yaml["nc"]:
+            LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
+            self.yaml["nc"] = nc  # override YAML value
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+        self.inplace = self.yaml.get('inplace', True)
+        self.stride = []
+        
+        # Build strides
+        
 
 
 #----------Define Multiple tasks learning base model end ----------
