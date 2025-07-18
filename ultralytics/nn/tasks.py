@@ -344,6 +344,63 @@ class BaseModel(torch.nn.Module):
         raise NotImplementedError("compute_loss() needs to be implemented by task heads")
 
 
+#---------- Define Multiple tasks learning base model begin ----------
+"""
+Why do we need to redefine the `MultiBaseModel` class instead of subclassing from `DetectionModel`? 
+After all, `OBBModel`, `SegmentationModel`, `PoseModel`, and `ClassificationModel` all subclass `DetectionModel`.
+- The `BaseModel` only returns the last output of the layers (single head), which isn't suitable for multi-task learning;
+- The redefined `MultiBaseModel` class is designed to handle multiple outputs from the model. Essentially, the `_forward_once` method will
+collect all outputs from the last layers (multi-heads) and return a dict of multi-heads.
+"""
+class MultiBaseModel(BaseModel):
+    """
+    Multi-tasks YOLO base model, inherits from `BaseModel`.
+    Support multiple heads (Detect, Segment, and Pose) and return all.
+    """
+    
+    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+        """
+        Perform a forward pass through the network.
+
+        Args:
+            x (torch.Tensor): The input tensor to the model.
+            profile (bool): Print the computation time of each layer if True.
+            visualize (bool): Save the feature maps of the model if True.
+            embed (list, optional): A list of feature vectors/embeddings to return.
+
+        Returns:
+            (dict): multi-heads output.
+        """
+        outputs, y, dt, embeddings = {}, [], [], []  # add `outputs` to collect multi-heads outputs
+        embed = frozenset(embed) if embed is not None else {-1} # 用户可以传入一个列表，指定哪些层的输出需要做embedding(特征池化)，如[5, 10, 15]，转成frozenset方便后续判断
+        max_idx = max(embed) # embed列表中的最大层索引，用于判断最后是否到达最后一个embedding层
+        for m in self.model:
+            if m.f != -1:  # if not from previous layer
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+            if profile:
+                self._profile_one_layer(m, x, dt)
+            x = m(x)  # run
+            # collect multi-heads outputs
+            if isinstance(m, (Detect, Segment, Pose)):
+                outputs[type(m).__name__] = x # {"Detect":output1, "Segment":output2, "Pose":output3}
+            y.append(x if m.i in self.save else None)  # 如果当前层索引在 self.save 列表中，则保存该层输出到 y，供后续层使用
+            if visualize:
+                feature_visualization(x, m.type, m.i, save_dir=visualize) # 如果 visualize=True，对当前层的特征图做可视化保存
+            if m.i in embed: # 如果当前层索引在 embed 列表中，说明用户希望提取该层的 embedding
+                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # 对当前层输出做自适应池化，变成 (batch, channel)
+                if m.i == max_idx: # 如果当前层是 embed 列表中的最大索引，说明 embedding 收集完毕
+                    outputs["embeddings"] = torch.unbind(torch.cat(embeddings, 1), dim=0) # 将所有 embedding 沿 channel 维拼接，然后按 batch 维拆分，存入 outputs 字典。
+                    return outputs # 到达embeding最大层时返回outputs字典，避免继续无意义遍历后续层，节约计算和内存
+        return outputs
+
+
+class MultiModel(MultiBaseModel):
+    pass # TODO
+
+
+#----------Define Multiple tasks learning base model end ----------
+
+
 class DetectionModel(BaseModel):
     """
     YOLO detection model.
