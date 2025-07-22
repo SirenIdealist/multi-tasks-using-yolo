@@ -15,6 +15,7 @@ from ultralytics.nn.tasks import (
     WorldModel,
     YOLOEModel,
     YOLOESegModel,
+    MultiModel # add class `MultiModel` for multi-task support
 )
 from ultralytics.utils import ROOT, YAML
 
@@ -118,6 +119,14 @@ class YOLO(Model):
                 "validator": yolo.obb.OBBValidator,
                 "predictor": yolo.obb.OBBPredictor,
             },
+
+            # add multi-tasks mapping here
+            "multi_tasks": {
+                "model": MultiModel,  
+                "trainer": yolo.multi_tasks.MultiTaskPredictor,
+                "validator": yolo.multi_tasks.MultiTaskValidator,
+                "predictor": yolo.multi_tasks.MultiTaskPredictor,    
+            }
         }
 
 

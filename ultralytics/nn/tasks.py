@@ -442,6 +442,21 @@ class MultiBaseModel(BaseModel):
         return self
 
 class MultiModel(MultiBaseModel):
+    """
+    Multi-task YOLO model supporting detection, segmentation, and pose estimation.
+    
+    This class extends MultiBaseModel to handle multiple tasks simultaneously,
+    with shared backbone and neck, but separate task-specific heads.
+    
+    Attributes:
+        yaml (dict): Model configuration dictionary.
+        model (torch.nn.Sequential): The neural network model.
+        save (list): List of layer indices to save outputs from.
+        names (dict): Class names dictionary.
+        inplace (bool): Whether to use inplace operations.
+        stride (torch.Tensor): Model stride values.
+        task_heads (dict): Dictionary mapping task names to head indices.
+    """
     
     def __init__(self, cfg='yolo11n-multi.yaml', ch=3, nc=None, verbose=True):
         """
@@ -462,12 +477,84 @@ class MultiModel(MultiBaseModel):
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+        self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get('inplace', True)
-        self.stride = []
         
-        # Build strides
+        # Find and store task heads
+        self.task_heads = {}
+        for i, m in enumerate(self.model):
+            if isinstance(m, Detect):
+                self.task_heads['detect'] = i
+            elif isinstance(m, Segment):
+                self.task_heads['segment'] = i  
+            elif isinstance(m, Pose):
+                self.task_heads['pose'] = i
         
-
+        # Build strides from the first detection-like head found
+        self._build_strides(ch, verbose)
+        
+        # Initialize weights
+        initialize_weights(self)
+        if verbose:
+            self.info()
+            LOGGER.info("")
+    
+    def _build_strides(self, ch, verbose):
+        """Build stride values for the model based on detection head."""
+        # Find any detection-like head to build strides
+        detection_head = None
+        for m in self.model:
+            if isinstance(m, (Detect, Segment, Pose)):
+                detection_head = m
+                break
+        
+        if detection_head is not None:
+            s = 256  # 2x min stride
+            detection_head.inplace = self.inplace
+            
+            # Set model to eval mode temporarily for stride calculation
+            self.model.eval()
+            detection_head.training = True  # Keep head in training mode for stride calculation
+            
+            # Forward pass to get strides
+            with torch.no_grad():
+                outputs = self._predict_once(torch.zeros(1, ch, s, s))
+                
+                # Extract detection output for stride calculation
+                if 'Detect' in outputs:
+                    detect_out = outputs['Detect']
+                elif 'Segment' in outputs:
+                    detect_out = outputs['Segment']
+                elif 'Pose' in outputs:
+                    detect_out = outputs['Pose']
+                else:
+                    # Fallback: use any available output
+                    detect_out = next(iter(outputs.values()))
+                
+                # Calculate strides based on output shapes
+                if isinstance(detect_out, (list, tuple)):
+                    detection_head.stride = torch.tensor([s / x.shape[-2] for x in detect_out])
+                else:
+                    detection_head.stride = torch.tensor([32])  # default stride
+            
+            self.stride = detection_head.stride
+            self.model.train()  # Set back to training mode
+            detection_head.bias_init()  # Initialize biases
+        else:
+            self.stride = torch.Tensor([32])  # default stride
+    
+    def init_criterion(self):
+        """Initialize loss criteria for all tasks."""
+        # This will be implemented based on which heads are present
+        criteria = {}
+        if 'detect' in self.task_heads:
+            criteria['detect'] = v8DetectionLoss(self)
+        if 'segment' in self.task_heads:
+            criteria['segment'] = v8SegmentationLoss(self)
+        if 'pose' in self.task_heads:
+            criteria['pose'] = v8PoseLoss(self)
+        return criteria
+        
 
 #----------Define Multiple tasks learning base model end ----------
 
