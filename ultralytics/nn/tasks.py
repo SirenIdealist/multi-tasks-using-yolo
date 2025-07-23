@@ -554,6 +554,59 @@ class MultiModel(MultiBaseModel):
         if 'pose' in self.task_heads:
             criteria['pose'] = v8PoseLoss(self)
         return criteria
+
+    def loss(self, batch, preds=None):
+        """
+        Compute multi-task loss.
+        
+        Args:
+            batch (dict): Batch to compute loss on.
+            preds (dict, optional): Multi-task predictions from forward pass.
+            
+        Returns:
+            (torch.Tensor): Total loss.
+            (torch.Tensor): Individual loss items for logging.
+        """
+        if not hasattr(self, 'criterion'):
+            self.criterion = self.init_criterion()
+            
+        # Get predictions if not provided
+        if preds is None:
+            preds = self.forward(batch["img"])
+            
+        # Compute losses for each task
+        total_loss = 0
+        loss_items = []
+        
+        # Detection loss
+        if 'detect' in self.task_heads and 'Detect' in preds:
+            det_loss = self.criterion['detect'](preds['Detect'], batch)
+            total_loss += det_loss
+            # Extract individual detection loss components
+            if hasattr(self.criterion['detect'], 'loss_items'):
+                loss_items.extend(self.criterion['detect'].loss_items)
+            else:
+                loss_items.append(det_loss.item())
+        
+        # Segmentation loss  
+        if 'segment' in self.task_heads and 'Segment' in preds:
+            seg_loss = self.criterion['segment'](preds['Segment'], batch)
+            total_loss += seg_loss
+            if hasattr(self.criterion['segment'], 'loss_items'):
+                loss_items.extend(self.criterion['segment'].loss_items)
+            else:
+                loss_items.append(seg_loss.item())
+        
+        # Pose loss
+        if 'pose' in self.task_heads and 'Pose' in preds:
+            pose_loss = self.criterion['pose'](preds['Pose'], batch)
+            total_loss += pose_loss
+            if hasattr(self.criterion['pose'], 'loss_items'):
+                loss_items.extend(self.criterion['pose'].loss_items)
+            else:
+                loss_items.append(pose_loss.item())
+        
+        return total_loss, torch.tensor(loss_items, device=total_loss.device)
         
 
 #----------Define Multiple tasks learning base model end ----------
