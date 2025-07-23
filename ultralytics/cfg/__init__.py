@@ -55,6 +55,7 @@ TASK2DATA = {
     "classify": "imagenet10",
     "pose": "coco8-pose.yaml",
     "obb": "dota8.yaml",
+    "multi_tasks": "multi_tasks_model_datasets.yaml", # NOTE: This is a custom task for multi-tasks model
 }
 TASK2MODEL = {
     "detect": "yolo11n.pt",

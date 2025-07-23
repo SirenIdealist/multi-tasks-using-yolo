@@ -1,0 +1,25 @@
+# dataset root dir
+path: /home/ubuntu/repos/multi-tasks-using-yolo/data/tomato_peduncle
+
+
+# Train / val / test image path for all tasks
+train: images/train
+val: images/val
+
+
+# labels list for all tasks
+labels_list:
+  - detection_keypoints
+  - detection_peduncle
+  - segmentation_instance
+
+
+names:
+  0: tomato_peduncle # for object detection 
+  1: peduncle_mask   # for instance segmentation
+
+  # four keypoints we have defined, the below are for pose estimation
+  2: Mtop # Main stem top
+  3: Jp   # Joint points
+  4: Mbut # Main stem bottom
+  5: Pu   # Peduncle

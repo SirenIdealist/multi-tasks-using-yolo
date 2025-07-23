@@ -1,5 +1,5 @@
-from .predict import MultiTaskPredictor
-from .train import MultiTaskTrainer
-from .val import MultiTaskValidator
+from .predict import MultiTasksPredictor
+from .train import MultiTasksTrainer
+from .val import MultiTasksValidator
 
-__all__ = ["MultiTaskPredictor", "MultiTaskTrainer", "MultiTaskValidator"]
+__all__ = ["MultiTasksPredictor", "MultiTasksTrainer", "MultiTasksValidator"]

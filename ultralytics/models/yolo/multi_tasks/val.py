@@ -1,5 +1,5 @@
 from ultralytics.engine.validator import BaseValidator
 
 
-class MultiTaskValidator(BaseValidator):
+class MultiTasksValidator(BaseValidator):
     pass

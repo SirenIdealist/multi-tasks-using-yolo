@@ -123,9 +123,9 @@ class YOLO(Model):
             # add multi-tasks mapping here
             "multi_tasks": {
                 "model": MultiModel,  
-                "trainer": yolo.multi_tasks.MultiTaskPredictor,
-                "validator": yolo.multi_tasks.MultiTaskValidator,
-                "predictor": yolo.multi_tasks.MultiTaskPredictor,    
+                "trainer": yolo.multi_tasks.MultiTasksTrainer,
+                "validator": yolo.multi_tasks.MultiTasksValidator,
+                "predictor": yolo.multi_tasks.MultiTasksPredictor,    
             }
         }
 

@@ -146,12 +146,12 @@ class Model(torch.nn.Module):
         # Load or create new YOLO model
         __import__("os").environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # to avoid deterministic warnings
         if str(model).endswith((".yaml", ".yml")):
-            self._new(model, task=task, verbose=verbose)
+            self._new(model, task=task, verbose=verbose) # 如果传入的model参数是以`.yaml`或`.yml`结尾，则调用self._new方法依据配置文件初始化模型
         else:
-            self._load(model, task=task)
+            self._load(model, task=task) # 否则则从checkpoint文件加载模型
 
         # Delete super().training for accessing self.model.training
-        del self.training
+        del self.training # TODO：我不懂这里为啥要 `del self.training`
 
     def __call__(
         self,
@@ -770,33 +770,41 @@ class Model(torch.nn.Module):
             >>> results = model.train(data="coco8.yaml", epochs=3)
         """
         self._check_is_pytorch_model()
+        ########### 
+        # 如果模型是通过 Ultralytics HUB 加载的，并且 session 已有模型，则直接用 HUB 的训练参数，忽略本地传入的参数
         if hasattr(self.session, "model") and self.session.model.id:  # Ultralytics HUB session with loaded model
             if any(kwargs):
                 LOGGER.warning("using HUB training arguments, ignoring local training arguments.")
             kwargs = self.session.train_args  # overwrite kwargs
+        ############
 
-        checks.check_pip_update_available()
+        checks.check_pip_update_available() # 检查是否有 Ultralytics 包的更新
 
         if isinstance(kwargs.get("pretrained", None), (str, Path)):
-            self.load(kwargs["pretrained"])  # load pretrained weights if provided
-        overrides = YAML.load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides
+            self.load(kwargs["pretrained"])  # # 如果传入了预训练权重路径(如pretrained="best.pt")，则加载预训练权重
+        overrides = YAML.load(checks.check_yaml(kwargs["cfg"])) if kwargs.get("cfg") else self.overrides # # 如果传入了 'cfg' 参数（yaml文件），则用 YAML 加载这个配置文件，得到一个配置字典 overrides，如果没有传入，则用 self.overrides（模型初始化时保存的配置）
         custom = {
             # NOTE: handle the case when 'cfg' includes 'data'.
-            "data": overrides.get("data") or DEFAULT_CFG_DICT["data"] or TASK2DATA[self.task],
-            "model": self.overrides["model"],
-            "task": self.task,
+            "data": overrides.get("data") or DEFAULT_CFG_DICT["data"] or TASK2DATA[self.task], # 优先使用配置文件中的 data 字段（数据集路径），否则用默认配置或根据任务类型自动选择
+            "model": self.overrides["model"], # 模型路径
+            "task": self.task, # 任务类型
         }  # method defaults
-        args = {**overrides, **custom, **kwargs, "mode": "train"}  # highest priority args on the right
+        args = {**overrides, **custom, **kwargs, "mode": "train"}  # # 合并所有参数，优先级从左到右，最后加上 "mode": "train" 表示训练模式
         if args.get("resume"):
-            args["resume"] = self.ckpt_path
+            args["resume"] = self.ckpt_path # 如果需要断点恢复训练，则设置恢复路径
 
-        self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
-        if not args.get("resume"):  # manually set model only if not resuming
+        """
+        trainer：如果你传入了自定义训练器就用它，否则用 _smart_load("trainer") 自动根据任务类型（如检测、分割）加载合适的训练器类。
+        overrides=args：把前面准备好的所有训练参数（包括数据集路径、训练轮数等）传给训练器。
+        _callbacks=self.callbacks：传入回调函数（比如训练开始、结束时的自定义操作）。
+        """
+        self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks) 
+        if not args.get("resume"):  # 如果不是断点恢复训练（resume），就手动设置训练器里的模型
             self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
             self.model = self.trainer.model
 
         self.trainer.hub_session = self.session  # attach optional HUB session
-        self.trainer.train()
+        self.trainer.train() # 正式开始训练。训练器会根据前面传入的参数（如数据集路径、训练轮数等）加载数据集、构建模型、执行训练
         # Update model and cfg after training
         if RANK in {-1, 0}:
             ckpt = self.trainer.best if self.trainer.best.exists() else self.trainer.last

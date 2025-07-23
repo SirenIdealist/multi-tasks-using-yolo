@@ -250,12 +250,18 @@ class BaseTrainer:
     def _setup_train(self, world_size):
         """Build dataloaders and optimizer on correct rank process."""
         # Model
-        self.run_callbacks("on_pretrain_routine_start")
-        ckpt = self.setup_model()
-        self.model = self.model.to(self.device)
-        self.set_model_attributes()
+        self.run_callbacks("on_pretrain_routine_start") # self.run_callbacks(event)方法会执行所有注册到指定事件（event）上的回调函数
+        ckpt = self.setup_model() # 如果模型还没有加载（即 self.model 不是 torch.nn.Module），后面会根据模型路径、权重文件、配置文件等进行模型的加载或创建
+        self.model = self.model.to(self.device) # 将模型移动到指定的设备
+        self.set_model_attributes() 
 
-        # Freeze layers
+
+        ###############################   Freeze layers begin   ###############################
+        # 这段代码的主要作用是根据用户配置，自动冻结或解冻模型的部分参数，以实现迁移学习、微调等训练策略。
+        # 冻结参数意味着这些参数在训练过程中不会被优化（即不会更新），常用于只训练部分网络层或防止预训练层被修改
+        #   - 参数冻结：在迁移学习或微调时，通常只训练部分网络层，其余层保持不变。通过设置 requires_grad=False 实现。
+        #   - 参数解冻：如果某些参数被错误地设置为不可训练，可以通过 requires_grad=True 恢复。
+        #   - 浮点类型检查：只有浮点类型参数才需要梯度，其他类型参数（如整数型）不会被优化。
         freeze_list = (
             self.args.freeze
             if isinstance(self.args.freeze, list)
@@ -266,37 +272,49 @@ class BaseTrainer:
         always_freeze_names = [".dfl"]  # always freeze these layers
         freeze_layer_names = [f"model.{x}." for x in freeze_list] + always_freeze_names
         self.freeze_layer_names = freeze_layer_names
-        for k, v in self.model.named_parameters():
+        for k, v in self.model.named_parameters(): # self.model.named_parameters() 是 PyTorch 中 nn.Module 类的一个方法，用于返回模型中所有可训练参数（即需要计算梯度的参数）的迭代器，每个参数以 (名称，参数张量) 的元组形式呈现。
             # v.register_hook(lambda x: torch.nan_to_num(x))  # NaN to 0 (commented for erratic training results)
-            if any(x in k for x in freeze_layer_names):
-                LOGGER.info(f"Freezing layer '{k}'")
-                v.requires_grad = False
-            elif not v.requires_grad and v.dtype.is_floating_point:  # only floating point Tensor can require gradients
+            if any(x in k for x in freeze_layer_names): # 如果参数名称包含在 freeze_layer_names 中，则当前参数名属于需要冻结的层
+                LOGGER.info(f"Freezing layer '{k}'") # 打印日志，提示正在冻结该层
+                v.requires_grad = False # 将该参数的 requires_grad 属性设置为 False，表示在训练过程中不计算该参数的梯度
+            elif not v.requires_grad and v.dtype.is_floating_point:  # 如果参数本来就不需要梯度（not v.requires_grad），但它是浮点类型（只有浮点类型参数才能被优化），则发出警告并强制设置为可训练，这样做是为了防止误操作导致本应训练的参数被错误地冻结
                 LOGGER.warning(
                     f"setting 'requires_grad=True' for frozen layer '{k}'. "
                     "See ultralytics.engine.trainer for customization of frozen layers."
                 )
                 v.requires_grad = True
+        ######################################## Freeze layers end   ########################################
 
-        # Check AMP
-        self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
-        if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP
-            callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
-            self.amp = torch.tensor(check_amp(self.model), device=self.device)
+        ######################################## Check AMP begin ########################################
+        # 这段代码的主要作用是自动混合精度（AMP）训练的初始化和分布式训练的设置，以提升训练速度和节省显存，同时兼容多卡分布式训练（DDP）
+
+        self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False，self.args.amp 是配置文件或命令行参数中指定的 AMP（自动混合精度）开关，用 torch.tensor 包装并移动到训练设备（如 GPU），方便后续分布式同步。
+        if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP，如果 AMP 开启，并且当前是主进程（单卡或 DDP 的主卡），则进一步检查模型是否真的支持 AMP（比如有些模型结构不兼容）。
+            callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them，检查过程中会重置回调，所以先备份再恢复，保证训练流程的回调不丢失。
+            self.amp = torch.tensor(check_amp(self.model), device=self.device) # check_amp(self.model) 会自动检测模型是否适合 AMP，并返回结果，对应在终端中会有“AMP: running Automatic Mixed Precision (AMP) checks...; AMP: checks passed ✅” 的提示
             callbacks.default_callbacks = callbacks_backup  # restore callbacks
-        if RANK > -1 and world_size > 1:  # DDP
-            dist.broadcast(self.amp.int(), src=0)  # broadcast from rank 0 to all other ranks; gloo errors with boolean
-        self.amp = bool(self.amp)  # as boolean
+        if RANK > -1 and world_size > 1:  # DDP， 如果是分布式训练（DDP），需要把 AMP 参数从主进程同步到所有进程，保证所有卡的 AMP 设置一致
+            dist.broadcast(self.amp.int(), src=0)  # broadcast from rank 0 to all other ranks; gloo errors with boolean，用 dist.broadcast 实现同步，注意 AMP 参数要转成整数类型，否则某些后端（如 gloo）会报错。
+        self.amp = bool(self.amp)  # as boolean，最终将 AMP 参数转回布尔值，方便后续代码判断
         self.scaler = (
             torch.amp.GradScaler("cuda", enabled=self.amp) if TORCH_2_4 else torch.cuda.amp.GradScaler(enabled=self.amp)
-        )
-        if world_size > 1:
-            self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
+        ) # AMP训练需要用梯度缩放器（GradScaler），防止混合精度下梯度过小导致数值不稳定
+        if world_size > 1: # 如果是多卡分布式训练（world_size > 1）
+            self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True) # DistributedDataParallel 封装模型，实现多卡同步训练；find_unused_parameters=True 可以兼容部分参数未参与前向传播的情况。
+        
+        ########################################## Check AMP end ########################################
 
-        # Check imgsz
+        ########################################## Check imgsz begin ##########################################
+        # 这段代码的主要作用是根据模型的最大步长（stride）自动调整输入图片尺寸（imgsz），保证图片尺寸与模型结构兼容，并为多尺度训练做准备
+        #   - 卷积神经网络的步长（stride）：决定了网络下采样的比例，影响输入图片尺寸的约束。比如步长为32，输入图片尺寸必须是32的倍数，否则最后一层特征图尺寸不对。
+        #   - grid size 指的是模型输出特征图的每个单元（cell）在原始输入图片上所对应的实际像素区域大小。在 YOLO 等检测模型中，输入图片会经过多次下采样（stride），最终输出一个较小的特征图。每个特征图单元负责预测原图上一个区域的目标。
+        #   - 多尺度训练：训练时动态调整图片尺寸，可以提升模型的泛化能力，但必须保证所有尺寸都与步长兼容。
+
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
-        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1)
-        self.stride = gs  # for multiscale training
+        self.args.imgsz = check_imgsz(self.args.imgsz, stride=gs, floor=gs, max_dim=1) # 保证输入图片尺寸与模型结构兼容，避免因尺寸不匹配导致推理或训练报错
+        self.stride = gs  # for multiscale training，把步长保存到 self.stride 属性，后续训练或推理时可以用来做多尺度训练、数据增强等
+
+        ########################################## Check imgsz end ##########################################
 
         # Batch size
         if self.batch_size < 1 and RANK == -1:  # single-GPU only, estimate best batch size
@@ -307,8 +325,10 @@ class BaseTrainer:
         self.train_loader = self.get_dataloader(
             self.data["train"], batch_size=batch_size, rank=LOCAL_RANK, mode="train"
         )
-        if RANK in {-1, 0}:
+        # RANK 是分布式训练（DDP）中的进程编号（rank），用于区分不同的训练进程。在 Ultralytics 框架中，RANK == -1 表示单机单卡训练（非分布式），RANK == 0 表示分布式训练的主进程（主卡）。其它值（如 1, 2, ...）表示分布式训练的其它辅助进程（副卡）。
+        if RANK in {-1, 0}: # 判断当前进程是否是主进程或单机训练进程，只有主进程或单机训练时，才会执行后面的代码块，比如日志输出、保存模型、绘图、验证、保存指标等，这样做可以避免多进程重复执行同样的操作，比如多卡同时保存模型或写日志，导致冲突或冗余。在分布式训练时，只有主进程(RANK == 1)负责保存模型和输出日志，其它进程只参与计算和同步，不做这些操作
             # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
+            # TODO: 这里的get_dataloader和get_validator方法需要重写！！！！！！！对应ultralytics/models/yolo/multi_tasks下面的文件
             self.test_loader = self.get_dataloader(
                 self.data.get("val") or self.data.get("test"),
                 batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
@@ -618,7 +638,8 @@ class BaseTrainer:
     def setup_model(self):
         """
         Load, create, or download model for any task.
-
+        如果 self.model 已经是一个 PyTorch 的模型对象（torch.nn.Module），说明模型已经加载好了，不需要再做任何处理，直接返回
+        如果模型还没有加载（即 self.model 不是 torch.nn.Module），后面会根据模型路径、权重文件、配置文件等进行模型的加载或创建。
         Returns:
             (dict): Optional checkpoint to resume training from.
         """
